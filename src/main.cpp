@@ -15,8 +15,7 @@
 
 void SetupCUDA();
 void AffineTransform(cv::Mat &src, cv::Mat &dst, float a, float b, float c, float d, float tx, float ty);
-void TileScaledImage(cv::Mat &imgScaled, cv::Mat &tiledOutput, int imgWidth, int imgHeight);
-void SeamlessTiling(cv::Mat &src);
+void GenerateSeamlessImage(cv::Mat &src);
 
 int main(int argc, char *argv[])
 {
@@ -26,9 +25,13 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	// start a main process
+	std::cout << "========== Start main process ==========" << std::endl;
+	auto start = std::chrono::high_resolution_clock::now();
+
 	const char *filename = argv[1];
-	double scale = 0.5f;
-	bool variable_size = false;
+	double scale_x = 1.f;
+	double scale_y = 1.f;
 	// if false, the size will be original width * height, otherwise, the size will be nearest power of two of resulted image.
 	// TODO: vertical and horizontal repeat setting from argv
 	// int horizontal_repeat = atoi(argv[2]);
@@ -49,64 +52,51 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 
-	int width = img.rows;
-	int height = img.cols;
-	int channel = img.channels();
-	std::cout << "Width: " << width << ", Height: " << height << ", Channel: " << channel << std::endl;
-
-	// scaling -> tiling -> cropping
-	cv::Mat imgScaled, tiledOutput, finalOutput, finalOutputCropped;
-	if (variable_size)
+	std::cout << "[Current target] " << "Width: " << img.rows << ", Height: " << img.cols << ", Channel: " << img.channels() << std::endl;
+	// 1. scaling
+	cv::Mat imgScaled;
+	AffineTransform(img, imgScaled, scale_x, 0, 0, scale_y, 0, 0);
 	{
-		width *= scale, height *= scale;
-		TileScaledImage(img, tiledOutput, width, height);
+		// finish the scaling process
+		auto end = std::chrono::high_resolution_clock::now();
+		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+		std::cout << "Scaling target image finished. Elapsed time: " << elapsed << " ms" << std::endl;
+		start = end;
 	}
-	else
+	std::cout << "[Current target] " << "Width: " << imgScaled.rows << ", Height: " << imgScaled.cols << ", Channel: " << imgScaled.channels() << std::endl;
+	cv::imwrite("img_before_poisson_texture_tiling.png", imgScaled);
+
+	// 2. generating seamless image
+	GenerateSeamlessImage(imgScaled);
 	{
-		AffineTransform(img, imgScaled, 1. / scale, 0, 0, 1. / scale, 0, 0);
-		TileScaledImage(imgScaled, tiledOutput, width, height);
+		// finish the tiling process
+		auto end = std::chrono::high_resolution_clock::now();
+		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+		std::cout << " Generating seamless image finished. Elapsed time: " << elapsed << " ms" << std::endl;
+		start = end;
 	}
 
-	if (variable_size)
-	{
-		int adjustedSize = 1;
-		// find nearest power of two.
-		while (adjustedSize < width)
-		{
-			adjustedSize <<= 1;
-		}
-		if (adjustedSize - width > width - (adjustedSize >> 1))
-		{
-			adjustedSize >>= 1;
-		}
-		cv::resize(tiledOutput, finalOutputCropped, cv::Size(adjustedSize, adjustedSize));
-		height = adjustedSize;
-		width = adjustedSize;
-	}
-	else
-	{
-		finalOutputCropped = tiledOutput;
-	}
-	SeamlessTiling(finalOutputCropped);
-
-	cv::namedWindow("Test Result", cv::WINDOW_AUTOSIZE);
-	cv::imshow("Test Result", tiledOutput);
-	cv::imshow("Final Result Cropped", finalOutputCropped);
-
+	// 3. tiling 3x3
 	cv::Mat one[3], two[3], three;
 	for (int i = 0; i < 3; ++i)
 	{
-		one[i] = finalOutputCropped;
+		one[i] = imgScaled;
 	}
 	for (int i = 0; i < 3; ++i)
 	{
 		hconcat(one, 3, two[i]);
 	}
 	vconcat(two, 3, three);
-	cv::imshow("Tiled Result", three);
+	// cv::namedWindow("Test Result", cv::WINDOW_AUTOSIZE);
+	// cv::imshow("Test Result", imgScaled);
+	// cv::imshow("Final Result Cropped", imgScaled);
+	// cv::imshow("Tiled Result", three);
+	// cv::waitKey(0);
 
-	cv::waitKey(0);
-	cv::imwrite("affine.png", finalOutputCropped);
+	// const cv::Rect roi(0, 0, width, height);
+	// imgScaled = finalResult(roi).clone();
+
+	cv::imwrite("img_after_poisson_texture_tiling.png", imgScaled);
 	cv::imwrite("tiled_poisson.png", three);
 	cv::destroyAllWindows();
 
@@ -123,16 +113,16 @@ void SetupCUDA()
 }
 #endif
 
-void AffineTransform(cv::Mat &src, cv::Mat &dst, float a, float b, float c, float d, float tx, float ty)
+void AffineTransform(cv::Mat &src, cv::Mat &dst, float scale_x, float b, float c, float scale_y, float tx, float ty)
 {
 	int width = src.cols;
 	int height = src.rows;
 	int channel = src.channels();
-	int resized_width = (int)width * a;
-	int resized_height = (int)height * d;
+	int resized_width = (int)width * scale_x;
+	int resized_height = (int)height * scale_y;
 
 	dst = cv::Mat::zeros(resized_height, resized_width, CV_MAKE_TYPE(8U, channel));
-	cv::Mat M = (cv::Mat_<float>(2, 3) << a, b, tx, c, d, ty);
+	cv::Mat M = (cv::Mat_<float>(2, 3) << scale_x, b, tx, c, scale_y, ty);
 #ifdef WITH_CUDA
 	cv::cuda::GpuMat gSrc, gDst;
 	// upload src and dst matrix
@@ -145,27 +135,14 @@ void AffineTransform(cv::Mat &src, cv::Mat &dst, float a, float b, float c, floa
 #endif
 }
 
-void TileScaledImage(cv::Mat &imgScaled, cv::Mat &tiledOutput, int imgWidth, int imgHeight)
+/**
+ * @brief Solve Poisson equation using SOR method (improved gauss seidel method)
+ * Time complexity: O(k * N) (N: number of pixels, k: number of iterations until convergence)
+ * Space complexity: O(N)
+ * Comment: if use the fact that a target matrix is sparse, time order will improve to O(k * N)
+ */
+void PoissonSolver_SOR(cv::Mat &src)
 {
-	const int maxScale = 10;
-	int tileCount = (imgWidth + imgScaled.cols - 1) / imgScaled.cols; // calc minimum tiling count to cover original image size.
-	cv::Mat finalResult, resT[maxScale], T[maxScale];
-	for (int i = 0; i < tileCount; ++i)
-	{
-		T[i] = imgScaled;
-	}
-	for (int i = 0; i < tileCount; ++i)
-	{
-		cv::hconcat(T, tileCount, resT[i]);
-	}
-	cv::vconcat(resT, tileCount, finalResult);
-	const cv::Rect roi(0, 0, imgWidth, imgHeight);
-	tiledOutput = finalResult(roi).clone();
-}
-
-void PoissonSolver(cv::Mat &src)
-{
-	// SOR method (improved gauss seidel method)
 	int col = src.cols;
 	int row = src.rows;
 	cv::Mat dst = src.clone();
@@ -222,8 +199,12 @@ void PoissonSolver(cv::Mat &src)
 	src = dst.clone();
 }
 
-// build SparseMatrix + Cholesky decomposition to solve Ax = b
-void BuildMatrixAndSolve(cv::Mat &src)
+/**
+ * @brief Solve Poisson equation using SimplicialLDLT (direct method)
+ * Time complexity: O(N^1.5) when decomposing, O(N log N) when solving
+ * Space complexity: O(NlogN) (would increase due to fill-in?)
+ */
+void PoissonSolver_SimplicialLDLT(cv::Mat &src)
 {
 	int col = src.cols;
 	int row = src.rows;
@@ -297,15 +278,17 @@ void BuildMatrixAndSolve(cv::Mat &src)
 	}
 }
 
-void SeamlessTiling(cv::Mat &src)
+void GenerateSeamlessImage(cv::Mat &src)
 {
+	// TODO: separate the build matrix process
+
 	cv::Mat channels[3];
 	cv::split(src, channels);
 	for (cv::Mat &ch : channels)
 	{
 		ch.convertTo(ch, CV_64F);
-		BuildMatrixAndSolve(ch);
-		// PoissonSolver(ch)
+		// PoissonSolver_SOR(ch);
+		PoissonSolver_SimplicialLDLT(ch);
 		ch.convertTo(ch, CV_8U);
 	}
 	cv::merge(channels, 3, src);
