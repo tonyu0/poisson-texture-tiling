@@ -32,10 +32,6 @@ int main(int argc, char *argv[])
 	const char *filename = argv[1];
 	double scale_x = 1.f;
 	double scale_y = 1.f;
-	// if false, the size will be original width * height, otherwise, the size will be nearest power of two of resulted image.
-	// TODO: vertical and horizontal repeat setting from argv
-	// int horizontal_repeat = atoi(argv[2]);
-	// int vertical_repeat = atoi(argv[3]);
 
 	cv::useOptimized();
 #ifdef WITH_CUDA
@@ -53,18 +49,17 @@ int main(int argc, char *argv[])
 	}
 
 	std::cout << "[Current target] " << "Width: " << img.rows << ", Height: " << img.cols << ", Channel: " << img.channels() << std::endl;
-	// 1. scaling
+	// 1. scaling (TODO)
 	cv::Mat imgScaled;
 	AffineTransform(img, imgScaled, scale_x, 0, 0, scale_y, 0, 0);
 	{
 		// finish the scaling process
 		auto end = std::chrono::high_resolution_clock::now();
 		auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
-		std::cout << "Scaling target image finished. Elapsed time: " << elapsed << " ms" << std::endl;
+		// std::cout << "Scaling target image finished. Elapsed time: " << elapsed << " ms" << std::endl;
 		start = end;
 	}
-	std::cout << "[Current target] " << "Width: " << imgScaled.rows << ", Height: " << imgScaled.cols << ", Channel: " << imgScaled.channels() << std::endl;
-	cv::imwrite("img_before_poisson_texture_tiling.png", imgScaled);
+	// std::cout << "[Current target] " << "Width: " << imgScaled.rows << ", Height: " << imgScaled.cols << ", Channel: " << imgScaled.channels() << std::endl;
 
 	// 2. generating seamless image
 	GenerateSeamlessImage(imgScaled);
@@ -92,13 +87,13 @@ int main(int argc, char *argv[])
 	// cv::imshow("Final Result Cropped", imgScaled);
 	// cv::imshow("Tiled Result", three);
 	// cv::waitKey(0);
+	// cv::destroyAllWindows();
 
 	// const cv::Rect roi(0, 0, width, height);
 	// imgScaled = finalResult(roi).clone();
 
-	cv::imwrite("img_after_poisson_texture_tiling.png", imgScaled);
-	cv::imwrite("tiled_poisson.png", three);
-	cv::destroyAllWindows();
+	cv::imwrite("poisson_texture_tiling_output.png", imgScaled);
+	cv::imwrite("poisson_texture_tiling_output_tiled3x3.png", three);
 
 	return 0;
 }
@@ -206,81 +201,98 @@ void PoissonSolver_SOR(cv::Mat &src)
  */
 void PoissonSolver_SimplicialLDLT(cv::Mat &src)
 {
-	int col = src.cols;
-	int row = src.rows;
-	int n = col * row;
-	// solve n consecutive linear equations
-	auto A = Eigen::SparseMatrix<double>(n, n);
+	int w = src.cols;
+	int h = src.rows;
+	int n = w * h;
+	// 1. Compute the gradient-based Laplacian from the input image
+	// 2. Construct a sparse Laplacian matrix with periodic boundary conditions
 	auto b = Eigen::VectorXd(n);
+	b.setZero();
 	// this is a sparse matrix since this process only see 4-adjacent
-	static constexpr int dx[5]{0, -1, 0, 1, 0};
-	static constexpr int dy[5]{-1, 0, 0, 0, 1};
-	A.reserve(n * 5); // each pixel, 4 directions
+	static constexpr int numDir = 4;
+	static constexpr int dx[numDir]{0, -1, 1, 0};
+	static constexpr int dy[numDir]{-1, 0, 0, 1};
+
+	std::vector<Eigen::Triplet<double>> _A;
+	_A.reserve(n * (numDir + 1)); // each pixel, 4 directions + themselves = number of nun-zero elements
+
 	std::vector<double> _b(n);
-	for (int y = 0; y < row; ++y)
+	for (int y = 0; y < h; ++y)
 	{
-		for (int x = 0; x < col; ++x)
+		for (int x = 0; x < w; ++x)
 		{
-			int id = y * col + x;
-			A.startVec(id);
-			double fq = 0.0, vpq = 0.0;
-			for (int i = 0; i < 5; ++i)
+			int id = y * w + x;
+			_A.push_back(Eigen::Triplet<double>(id, id, 4.));
+
+			double fq = 0.;
+			double vpq = 0.;
+			for (int i = 0; i < numDir; ++i)
 			{
-				int ny = y + dy[i], nx = x + dx[i];
-				int nid = ny * col + nx;
-				double coef = (id == nid ? 4.0 : -1.0); // diagonal: 4.0
-				if (ny == -1 || ny == row)
+				int ny = y + dy[i];
+				int nx = x + dx[i];
+
+				if (0 <= ny && ny < h && 0 <= nx && nx < w)
 				{
-					// top or bottom boundary condition
-					// TODO: improve this condition to get better result.
-					vpq += (src.at<double>(0, x) + src.at<double>(row - 1, x)) / 2;
-				}
-				else if (nx == -1 || nx == col)
-				{
-					// left or right boundary condition
-					// TODO: improve this condition to get better result.
-					vpq += (src.at<double>(y, 0) + src.at<double>(y, col - 1)) / 2;
+					vpq += src.at<double>(y, x) - src.at<double>(ny, nx);
 				}
 				else
 				{
-					vpq += src.at<double>(y, x) - src.at<double>(ny, nx);
-					A.insertBack(nid, id) = coef;
+					// periodic boundary conditions
+					// and let the gradient between (y, x) and (ny, nx) be 0
+					ny = (ny + h) % h;
+					nx = (nx + w) % w;
 				}
+				int nid = ny * w + nx;
+				_A.push_back(Eigen::Triplet<double>(id, nid, -1.));
+
+				_b[id] = vpq;
 			}
-			_b[id] = vpq;
 		}
 	}
-	A.finalize();
+	// Load all the data into a matrix at once (maybe auto sorting)
+	Eigen::SparseMatrix<double> A(n, n);
+	A.setFromTriplets(_A.begin(), _A.end());
+
+	// Use before solve() for memory saving
+	A.makeCompressed();
+
 	b = Eigen::Map<Eigen::VectorXd>(&_b[0], _b.size());
 
-	// solve Ax = b
-	Eigen::VectorXd x;
+	// 3. Solve the sparse linear system (Ax = b)
 	Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver(A);
 	if (solver.info() != Eigen::Success)
 	{
 		std::cerr << "decomposition failed" << std::endl;
 	}
-	x = solver.solve(b);
+	Eigen::VectorXd x = solver.solve(b);
 	if (solver.info() != Eigen::Success)
 	{
 		std::cerr << "solving failed" << std::endl;
 	}
 
-	// copy result to pixel
-	for (int i = 0; i < row; ++i)
+	// 4. Adjust the global color offset
+	// Since the above linear system determines only relative pixel differences, not the absolute color level.
+	// Just as determining a particular solution from a general solution, it needs to determine the global color.
+	// This step restores the global color while preserving the seamless property.
+
+	double mean_diff = 0.;
+	for (int i = 0; i < h; ++i)
 	{
 		double *ptr = src.ptr<double>(i);
-		int base = i * col;
-		for (int j = 0; j < col; ++j)
+		int base = i * w;
+		for (int j = 0; j < w; ++j)
 		{
+			mean_diff += ptr[j] - x[base + j];
 			ptr[j] = x[base + j];
 		}
 	}
+	mean_diff /= h * w;
+	src += cv::Scalar(mean_diff);
 }
 
 void GenerateSeamlessImage(cv::Mat &src)
 {
-	// TODO: separate the build matrix process
+	// TODO: separate the process building matrix
 
 	cv::Mat channels[3];
 	cv::split(src, channels);
