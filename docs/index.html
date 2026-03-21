@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Poisson Texture Tiling DEMO (WASM)</title>
+</head>
+
+<body>
+    <a href="./wasm-test/">WASM String Test</a>
+    <hr />
+    <h1>(not implemented) Poisson Texture Tiling DEMO (WASM)</h1>
+    <input type="file" id="fileInput" accept="image/*">
+    <!-- <button onclick="convertInputImage">Convert</button> -->
+    <p>Result: </p>
+    <img src="#" alt="Image preview" id="imagePreview" style="max-width: 1280px; max-height: 720px; display: none;">
+
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const imagePreview = document.getElementById('imagePreview');
+
+        fileInput.addEventListener('change', function (event) {
+            const selectedFile = event.target.files[0];
+
+            if (selectedFile) {
+                const reader = new FileReader();
+
+                reader.onload = function (e) {
+                    imagePreview.src = e.target.result;
+                    imagePreview.style.display = 'block'; // Make the image visible
+                };
+
+                // Read the file as a Data URL (Base64 encoded string)
+                reader.readAsDataURL(selectedFile);
+            }
+        });
+    </script>
+</body>
+
+</html>

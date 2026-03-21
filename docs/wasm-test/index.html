@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>WASM String Test</title>
+</head>
+
+<body>
+    <h1>WASM String Test</h1>
+    <input type="text" id="inputBox" placeholder="Enter lowercase text">
+    <button onclick="processText()">Convert to Upper</button>
+    <p>Result: <span id="result"></span></p>
+
+    <script src="index.js"></script>
+    <script>
+        let instance;
+
+        // Init WASM module (the name is specified when running emcc)
+        createModule().then(Module => {
+            instance = Module;
+            console.log("WASM Loaded!");
+        });
+
+        function processText() {
+            const text = document.getElementById('inputBox').value;
+
+            // bound name (toUpperCase) is specified EMSCRIPTEN_BINDINGS of main.cpp
+            // Embind converting automatically: JS string <-> C++ std::string
+            const uppercaseText = instance.toUpperCase(text);
+
+            document.getElementById('result').innerText = uppercaseText;
+        }
+    </script>
+</body>
+
+</html>
