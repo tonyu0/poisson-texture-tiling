@@ -15,7 +15,7 @@
 
 void SetupCUDA();
 void AffineTransform(cv::Mat &src, cv::Mat &dst, float a, float b, float c, float d, float tx, float ty);
-void GenerateSeamlessImage(cv::Mat &src);
+void GenerateSeamlessImage(cv::Mat &src, int calc_type);
 
 int main(int argc, char *argv[])
 {
@@ -62,7 +62,7 @@ int main(int argc, char *argv[])
 	// std::cout << "[Current target] " << "Width: " << imgScaled.rows << ", Height: " << imgScaled.cols << ", Channel: " << imgScaled.channels() << std::endl;
 
 	// 2. generating seamless image
-	GenerateSeamlessImage(imgScaled);
+	GenerateSeamlessImage(imgScaled, 0);
 	{
 		// finish the tiling process
 		auto end = std::chrono::high_resolution_clock::now();
@@ -356,7 +356,7 @@ void MakeLaplacian(cv::Mat &src, Eigen::SparseMatrix<float> &A, cv::Mat &b)
 	A.makeCompressed();
 }
 
-void GenerateSeamlessImage(cv::Mat &src)
+void GenerateSeamlessImage(cv::Mat &src, int calc_type)
 {
 	// Solve Ax = b
 	Eigen::SparseMatrix<float> A;
@@ -370,8 +370,14 @@ void GenerateSeamlessImage(cv::Mat &src)
 
 		MakeLaplacian(ch, A, b);
 		// PoissonSolver_SOR(ch);
-		// PoissonSolver_SimplicialLDLT(A, b, ch);
-		PoissonSolver_FFT(b, ch);
+		if (calc_type == 0)
+		{
+			PoissonSolver_FFT(b, ch);
+		}
+		else if (calc_type == 1)
+		{
+			PoissonSolver_SimplicialLDLT(A, b, ch);
+		}
 		ch.convertTo(ch, CV_8U);
 	}
 	cv::merge(channels, 3, src);
