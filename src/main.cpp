@@ -9,7 +9,6 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/Cholesky>
-#include <opencv2/core/eigen.hpp>
 // #ifndef WITH_CUDA
 // #define WITH_CUDA
 // #endif
@@ -238,50 +237,67 @@ void PoissonSolver_SimplicialLDLT(Eigen::SparseMatrix<float> &A, cv::Mat &_b, cv
 	x += cv::Scalar(mean_diff);
 }
 
-void PoissonSolver_FFT(cv::Mat &b, cv::Mat &x)
+void PoissonSolver_FFT(cv::Mat &_b, cv::Mat &x)
 {
 	CV_Assert(x.type() == CV_32F);
 
-	int h = x.rows;
-	int w = x.cols;
+	cv::Mat b = _b.reshape(0, x.rows);
+
+	int h = b.rows;
+	int w = b.cols;
 
 	// --- FFT ---
 	cv::Mat b_complex;
 	cv::dft(b, b_complex, cv::DFT_COMPLEX_OUTPUT);
 
-	std::cout << " aaa " << std::endl;
+	// --- Solve the Poisson equation in Fourier Space ---
+	// Memo:
+	// Δx{i,j}​= 4x{i,j} - x{i+1,j} ​- x{i−1,j}​ - x{i,j+1} ​- x{i,j−1}
+	// と、Aの構築時には出していた
+	// x{i,j}=ei^(kx*​i + ky*​j)
+	// これはフーリエ空間上のx{i,j}
+	// Δx=(4 - e^(i*kx)​ - e^(−i*kx)​ - e^(i*ky)​ - e^(−i*ky)​) * x
+	// これをオイラーの公式でまとめると
+	// λ(kx​,ky​)=4 - 2cos(kx​) - 2cos(ky​)
+
 	cv::Mat x_complex = cv::Mat::zeros(h, w, CV_32FC2);
 
-	for (int y = 0; y < h; y++)
+	for (int i = 0; i < h; ++i)
 	{
-		float ky = 2.0f * CV_PI * y / h;
+		float ky = 2.0f * CV_PI * i / h;
 
-		for (int x_ = 0; x_ < w; x_++)
+		for (int j = 0; j < w; ++j)
 		{
-			float kx = 2.0f * CV_PI * x_ / w;
+			float kx = 2.0f * CV_PI * j / w;
 
-			float lambda = 2.0f * cos(kx) + 2.0f * cos(ky) - 4.0f;
+			float lambda = 4.f - 2.f * cos(kx) - 2.f * cos(ky);
 
-			cv::Vec2f b_val = b_complex.at<cv::Vec2f>(y, x_);
+			cv::Vec2f b_val = b_complex.at<cv::Vec2f>(i, j);
 
-			if (fabs(lambda) > 1e-5f)
+			if (fabs(lambda) > 1e-5f) // Limit the lower lambda to prevent divergence
 			{
-				x_complex.at<cv::Vec2f>(y, x_)[0] = b_val[0] / lambda;
-				x_complex.at<cv::Vec2f>(y, x_)[1] = b_val[1] / lambda;
-			}
-			else
-			{
-				// DC成分（平均値）はゼロ or 保持
-				x_complex.at<cv::Vec2f>(y, x_) = cv::Vec2f(0, 0);
+				x_complex.at<cv::Vec2f>(i, j)[0] = b_val[0] / lambda;
+				x_complex.at<cv::Vec2f>(i, j)[1] = b_val[1] / lambda;
 			}
 		}
 	}
 
-	// --- 逆FFT ---
+	// --- Inverse FFT ---
 	cv::Mat x_real;
 	cv::dft(x_complex, x_real, cv::DFT_INVERSE | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
 
-	x = x_real.clone();
+	// --- Adjust mean value ---
+	float mean_diff = 0.;
+	for (int i = 0; i < h; ++i)
+	{
+		for (int j = 0; j < w; ++j)
+		{
+			mean_diff += x.at<float>(i, j) - x_real.at<float>(i, j);
+			x.at<float>(i, j) = x_real.at<float>(i, j);
+		}
+	}
+	mean_diff /= h * w;
+	x += cv::Scalar(mean_diff);
 }
 
 void MakeLaplacian(cv::Mat &src, Eigen::SparseMatrix<float> &A, cv::Mat &b)
@@ -342,8 +358,7 @@ void MakeLaplacian(cv::Mat &src, Eigen::SparseMatrix<float> &A, cv::Mat &b)
 
 void GenerateSeamlessImage(cv::Mat &src)
 {
-	// TODO: separate the process building matrix
-
+	// Solve Ax = b
 	Eigen::SparseMatrix<float> A;
 	cv::Mat b;
 
@@ -355,8 +370,8 @@ void GenerateSeamlessImage(cv::Mat &src)
 
 		MakeLaplacian(ch, A, b);
 		// PoissonSolver_SOR(ch);
-		PoissonSolver_SimplicialLDLT(A, b, ch);
-		// PoissonSolver_FFT(b, src);
+		// PoissonSolver_SimplicialLDLT(A, b, ch);
+		PoissonSolver_FFT(b, ch);
 		ch.convertTo(ch, CV_8U);
 	}
 	cv::merge(channels, 3, src);
