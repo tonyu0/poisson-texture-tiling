@@ -13,14 +13,10 @@ This program contains following three steps to generate the texture.
     - Construct a sparse Laplacian matrix with periodic boundary conditions ( $A$ )
 2. Solve the sparse linear system
 3. Adjust the global color offset
-   
+
+This program provides two calculation methods: FFT ( O(NlogN) ) and Direct method using Cholesky decomposition ( O(N^1.5) )
+
 ---
-
-This program uses Eigen::SimplicialLDLT with Eigen::SparseMatrix to solve Poisson equation. 
-
-It seems time complexity is O(N^1.5), where N is the number of pixels in the image.
-
-So make sure not to input too large images.
 
 ### DEMO
 <table>
@@ -47,9 +43,6 @@ So make sure not to input too large images.
         </td>
     </tr>
 </table>
-
-### TODO
-- FFT-based Poisson solver
 
 ---
 
