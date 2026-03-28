@@ -9,6 +9,7 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 #include <Eigen/Cholesky>
+#include <opencv2/core/eigen.hpp>
 // #ifndef WITH_CUDA
 // #define WITH_CUDA
 // #endif
@@ -30,8 +31,8 @@ int main(int argc, char *argv[])
 	auto start = std::chrono::high_resolution_clock::now();
 
 	const char *filename = argv[1];
-	double scale_x = 1.f;
-	double scale_y = 1.f;
+	float scale_x = 1.f;
+	float scale_y = 1.f;
 
 	cv::useOptimized();
 #ifdef WITH_CUDA
@@ -142,26 +143,26 @@ void PoissonSolver_SOR(cv::Mat &src)
 	int row = src.rows;
 	cv::Mat dst = src.clone();
 	// this is a sparse matrix since this process only see 4-adjacent
-	static constexpr double EPS = 1e-5;
-	static constexpr double PI = 3.1415926535897932384626;
+	static constexpr float EPS = 1e-5;
+	static constexpr float PI = 3.1415926535897932384626;
 	static constexpr int iteration = 20000;
 	static constexpr int dx[4]{0, -1, 0, 1};
 	static constexpr int dy[4]{1, 0, -1, 0};
 	// left and right boundary conditions
 	for (int y = 0; y < row; ++y)
 	{
-		dst.at<double>(y, 0) = (src.at<double>(y, 0) + src.at<double>(y, col - 1)) / 2;
-		dst.at<double>(y, col - 1) = dst.at<double>(y, 0);
+		dst.at<float>(y, 0) = (src.at<float>(y, 0) + src.at<float>(y, col - 1)) / 2;
+		dst.at<float>(y, col - 1) = dst.at<float>(y, 0);
 	}
 	// top and bottom boundary conditions
 	for (int x = 0; x < col; ++x)
 	{
-		dst.at<double>(0, x) = (src.at<double>(0, x) + src.at<double>(row - 1, x)) / 2;
-		dst.at<double>(row - 1, x) = dst.at<double>(0, x);
+		dst.at<float>(0, x) = (src.at<float>(0, x) + src.at<float>(row - 1, x)) / 2;
+		dst.at<float>(row - 1, x) = dst.at<float>(0, x);
 	}
 
-	double rect = 0.5 * (cos(PI / src.rows) + cos(PI / src.cols));
-	double omega = 2. / (1 + sqrt(1 - rect * rect));
+	float rect = 0.5 * (cos(PI / src.rows) + cos(PI / src.cols));
+	float omega = 2. / (1 + sqrt(1 - rect * rect));
 	// optimum omega: https://www.sciencedirect.com/science/article/pii/S0893965908001523
 	for (int it = 0; it < iteration; ++it)
 	{
@@ -170,20 +171,20 @@ void PoissonSolver_SOR(cv::Mat &src)
 		{
 			for (int x = 1; x < col - 1; ++x)
 			{
-				double fq = 0.0, vpq = 0.0;
+				float fq = 0.0, vpq = 0.0;
 				for (int i = 0; i < 4; ++i)
 				{
 					int ny = y + dy[i], nx = x + dx[i];
-					fq += dst.at<double>(ny, nx);
-					vpq += src.at<double>(y, x) - src.at<double>(ny, nx); // guided vector depend on what to do
+					fq += dst.at<float>(ny, nx);
+					vpq += src.at<float>(y, x) - src.at<float>(ny, nx); // guided vector depend on what to do
 				}
-				double fp = (fq + vpq) / 4.;
-				double err = fabs(fp - dst.at<double>(y, x));
+				float fp = (fq + vpq) / 4.;
+				float err = fabs(fp - dst.at<float>(y, x));
 				if (err > EPS)
 				{
 					ok = false;
 				}
-				dst.at<double>(y, x) = (1. - omega) * dst.at<double>(y, x) + omega * fp;
+				dst.at<float>(y, x) = (1. - omega) * dst.at<float>(y, x) + omega * fp;
 			}
 		}
 		if (ok)
@@ -199,72 +200,19 @@ void PoissonSolver_SOR(cv::Mat &src)
  * Time complexity: O(N^1.5) when decomposing, O(N log N) when solving
  * Space complexity: O(NlogN) (would increase due to fill-in?)
  */
-void PoissonSolver_SimplicialLDLT(cv::Mat &src)
+void PoissonSolver_SimplicialLDLT(Eigen::SparseMatrix<float> &A, cv::Mat &_b, cv::Mat &x)
 {
-	int w = src.cols;
-	int h = src.rows;
+	int h = x.rows;
+	int w = x.cols;
 	int n = w * h;
-	// 1. Compute the gradient-based Laplacian from the input image
-	// 2. Construct a sparse Laplacian matrix with periodic boundary conditions
-	auto b = Eigen::VectorXd(n);
-	b.setZero();
-	// this is a sparse matrix since this process only see 4-adjacent
-	static constexpr int numDir = 4;
-	static constexpr int dx[numDir]{0, -1, 1, 0};
-	static constexpr int dy[numDir]{-1, 0, 0, 1};
-
-	std::vector<Eigen::Triplet<double>> _A;
-	_A.reserve(n * (numDir + 1)); // each pixel, 4 directions + themselves = number of nun-zero elements
-
-	std::vector<double> _b(n);
-	for (int y = 0; y < h; ++y)
-	{
-		for (int x = 0; x < w; ++x)
-		{
-			int id = y * w + x;
-			_A.push_back(Eigen::Triplet<double>(id, id, 4.));
-
-			double fq = 0.;
-			double vpq = 0.;
-			for (int i = 0; i < numDir; ++i)
-			{
-				int ny = y + dy[i];
-				int nx = x + dx[i];
-
-				if (0 <= ny && ny < h && 0 <= nx && nx < w)
-				{
-					vpq += src.at<double>(y, x) - src.at<double>(ny, nx);
-				}
-				else
-				{
-					// periodic boundary conditions
-					// and let the gradient between (y, x) and (ny, nx) be 0
-					ny = (ny + h) % h;
-					nx = (nx + w) % w;
-				}
-				int nid = ny * w + nx;
-				_A.push_back(Eigen::Triplet<double>(id, nid, -1.));
-
-				_b[id] = vpq;
-			}
-		}
-	}
-	// Load all the data into a matrix at once (maybe auto sorting)
-	Eigen::SparseMatrix<double> A(n, n);
-	A.setFromTriplets(_A.begin(), _A.end());
-
-	// Use before solve() for memory saving
-	A.makeCompressed();
-
-	b = Eigen::Map<Eigen::VectorXd>(&_b[0], _b.size());
-
+	Eigen::Map<Eigen::VectorXf> b(_b.ptr<float>(), _b.total());
 	// 3. Solve the sparse linear system (Ax = b)
-	Eigen::SimplicialLDLT<Eigen::SparseMatrix<double>> solver(A);
+	Eigen::SimplicialLDLT<Eigen::SparseMatrix<float>> solver(A);
 	if (solver.info() != Eigen::Success)
 	{
 		std::cerr << "decomposition failed" << std::endl;
 	}
-	Eigen::VectorXd x = solver.solve(b);
+	Eigen::VectorXf _x = solver.solve(b);
 	if (solver.info() != Eigen::Success)
 	{
 		std::cerr << "solving failed" << std::endl;
@@ -275,32 +223,140 @@ void PoissonSolver_SimplicialLDLT(cv::Mat &src)
 	// Just as determining a particular solution from a general solution, it needs to determine the global color.
 	// This step restores the global color while preserving the seamless property.
 
-	double mean_diff = 0.;
+	float mean_diff = 0.;
 	for (int i = 0; i < h; ++i)
 	{
-		double *ptr = src.ptr<double>(i);
+		float *ptr = x.ptr<float>(i);
 		int base = i * w;
 		for (int j = 0; j < w; ++j)
 		{
-			mean_diff += ptr[j] - x[base + j];
-			ptr[j] = x[base + j];
+			mean_diff += ptr[j] - _x[base + j];
+			ptr[j] = _x[base + j];
 		}
 	}
 	mean_diff /= h * w;
-	src += cv::Scalar(mean_diff);
+	x += cv::Scalar(mean_diff);
+}
+
+void PoissonSolver_FFT(cv::Mat &b, cv::Mat &x)
+{
+	CV_Assert(x.type() == CV_32F);
+
+	int h = x.rows;
+	int w = x.cols;
+
+	// --- FFT ---
+	cv::Mat b_complex;
+	cv::dft(b, b_complex, cv::DFT_COMPLEX_OUTPUT);
+
+	std::cout << " aaa " << std::endl;
+	cv::Mat x_complex = cv::Mat::zeros(h, w, CV_32FC2);
+
+	for (int y = 0; y < h; y++)
+	{
+		float ky = 2.0f * CV_PI * y / h;
+
+		for (int x_ = 0; x_ < w; x_++)
+		{
+			float kx = 2.0f * CV_PI * x_ / w;
+
+			float lambda = 2.0f * cos(kx) + 2.0f * cos(ky) - 4.0f;
+
+			cv::Vec2f b_val = b_complex.at<cv::Vec2f>(y, x_);
+
+			if (fabs(lambda) > 1e-5f)
+			{
+				x_complex.at<cv::Vec2f>(y, x_)[0] = b_val[0] / lambda;
+				x_complex.at<cv::Vec2f>(y, x_)[1] = b_val[1] / lambda;
+			}
+			else
+			{
+				// DC成分（平均値）はゼロ or 保持
+				x_complex.at<cv::Vec2f>(y, x_) = cv::Vec2f(0, 0);
+			}
+		}
+	}
+
+	// --- 逆FFT ---
+	cv::Mat x_real;
+	cv::dft(x_complex, x_real, cv::DFT_INVERSE | cv::DFT_REAL_OUTPUT | cv::DFT_SCALE);
+
+	x = x_real.clone();
+}
+
+void MakeLaplacian(cv::Mat &src, Eigen::SparseMatrix<float> &A, cv::Mat &b)
+{
+	int w = src.cols;
+	int h = src.rows;
+	int n = w * h;
+	// 1. Compute the gradient-based Laplacian from the input image
+	// 2. Construct a sparse Laplacian matrix with periodic boundary conditions
+	// this is a sparse matrix since this process only see 4-adjacent
+	static constexpr int numDir = 4;
+	static constexpr int dx[numDir]{0, -1, 1, 0};
+	static constexpr int dy[numDir]{-1, 0, 0, 1};
+
+	std::vector<Eigen::Triplet<float>> _A;
+	_A.reserve(n * (numDir + 1)); // each pixel, 4 directions + themselves = number of nun-zero elements
+	b = cv::Mat(1, n, CV_32F);
+
+	for (int y = 0; y < h; ++y)
+	{
+		for (int x = 0; x < w; ++x)
+		{
+			int id = y * w + x;
+			_A.push_back(Eigen::Triplet<float>(id, id, 4.));
+
+			float fq = 0.;
+			float vpq = 0.;
+			for (int i = 0; i < numDir; ++i)
+			{
+				int ny = y + dy[i];
+				int nx = x + dx[i];
+
+				if (0 <= ny && ny < h && 0 <= nx && nx < w)
+				{
+					vpq += src.at<float>(y, x) - src.at<float>(ny, nx);
+				}
+				else
+				{
+					// periodic boundary conditions
+					// and let the gradient between (y, x) and (ny, nx) be 0
+					ny = (ny + h) % h;
+					nx = (nx + w) % w;
+				}
+				int nid = ny * w + nx;
+				_A.push_back(Eigen::Triplet<float>(id, nid, -1.));
+
+				b.at<float>(0, id) = vpq;
+			}
+		}
+	}
+	// Load all the data into a matrix at once (maybe auto sorting)
+	A = Eigen::SparseMatrix<float>(n, n);
+	A.setFromTriplets(_A.begin(), _A.end());
+
+	// Use before solve() for memory saving
+	A.makeCompressed();
 }
 
 void GenerateSeamlessImage(cv::Mat &src)
 {
 	// TODO: separate the process building matrix
 
+	Eigen::SparseMatrix<float> A;
+	cv::Mat b;
+
 	cv::Mat channels[3];
 	cv::split(src, channels);
 	for (cv::Mat &ch : channels)
 	{
-		ch.convertTo(ch, CV_64F);
+		ch.convertTo(ch, CV_32F);
+
+		MakeLaplacian(ch, A, b);
 		// PoissonSolver_SOR(ch);
-		PoissonSolver_SimplicialLDLT(ch);
+		PoissonSolver_SimplicialLDLT(A, b, ch);
+		// PoissonSolver_FFT(b, src);
 		ch.convertTo(ch, CV_8U);
 	}
 	cv::merge(channels, 3, src);
